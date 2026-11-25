@@ -1,0 +1,50 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  model:
+    name: Tests + model gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Unit + end-to-end tests
+        run: pytest -q
+      - name: Model gate (full loop must pass fairness + accuracy gates)
+        run: python run_demo.py
+
+  infra:
+    name: Terraform checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+
+  image:
+    name: Build + smoke-test image
+    needs: [model, infra]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t cricket-mlops:${{ github.sha }} .
+      - name: Smoke test the container
+        run: |
+          docker run -d -p 8000:8000 --name api cricket-mlops:${{ github.sha }}
+          for i in $(seq 1 30); do curl -fs localhost:8000/health && break; sleep 1; done
+          curl -fs -X POST localhost:8000/predict -H 'Content-Type: application/json' \
+            -d '{"batting_average": 53.6, "strike_rate": 131, "boundary_pct": 0.61, "away_average": 48}'
+          curl -fs localhost:8000/metrics
